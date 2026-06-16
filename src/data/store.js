@@ -53,6 +53,40 @@ function mapHarvest(r) {
   };
 }
 
+function mapHarvestHive(r) {
+  if (!r) return null;
+  return {
+    id: r.id, harvestId: r.harvest_id, hiveId: r.hive_id,
+    quantityKg: r.quantity_kg, createdAt: r.created_at,
+  };
+}
+
+function mapTraceBatch(r) {
+  if (!r) return null;
+  return {
+    id: r.id, batchNo: r.batch_no, batchType: r.batch_type, quantityKg: r.quantity_kg,
+    product: r.product, status: r.status, harvestId: r.harvest_id, apiaryId: r.apiary_id,
+    note: r.note, createdAt: r.created_at,
+  };
+}
+
+function mapTraceEdge(r) {
+  if (!r) return null;
+  return {
+    id: r.id, transferType: r.transfer_type, fromBatchId: r.from_batch_id,
+    toBatchId: r.to_batch_id, quantityKg: r.quantity_kg, lossKg: r.loss_kg,
+    note: r.note, createdAt: r.created_at,
+  };
+}
+
+function mapCredential(r) {
+  if (!r) return null;
+  return {
+    id: r.id, batchId: r.batch_id, credentialHash: r.credential_hash,
+    parentHashes: r.parent_hashes, payload: r.payload, createdAt: r.created_at,
+  };
+}
+
 /* ----------------------------- 用户 ----------------------------- */
 
 function getUserByUsername(username) {
@@ -228,11 +262,98 @@ function createHarvest(d) {
   return mapHarvest(getDb().prepare('SELECT * FROM harvests WHERE id = ?').get(info.lastInsertRowid));
 }
 
+/* ----------------------------- 采收-蜂群关联 ----------------------------- */
+
+function listHarvestHivesByHarvest(harvestId) {
+  return getDb()
+    .prepare('SELECT * FROM harvest_hives WHERE harvest_id = ? ORDER BY id ASC')
+    .all(harvestId).map(mapHarvestHive);
+}
+function listHarvestHivesByHive(hiveId) {
+  return getDb()
+    .prepare('SELECT * FROM harvest_hives WHERE hive_id = ? ORDER BY id ASC')
+    .all(hiveId).map(mapHarvestHive);
+}
+function createHarvestHive(d) {
+  const info = getDb()
+    .prepare('INSERT INTO harvest_hives (harvest_id, hive_id, quantity_kg) VALUES (?, ?, ?)')
+    .run(d.harvestId, d.hiveId, d.quantityKg ?? 0);
+  return mapHarvestHive(getDb().prepare('SELECT * FROM harvest_hives WHERE id = ?').get(info.lastInsertRowid));
+}
+
+/* ----------------------------- 溯源批次 ----------------------------- */
+
+function listTraceBatches({ batchType, status } = {}) {
+  const where = [];
+  const params = [];
+  if (batchType) { where.push('batch_type = ?'); params.push(batchType); }
+  if (status) { where.push('status = ?'); params.push(status); }
+  const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  return getDb().prepare(`SELECT * FROM trace_batches ${clause} ORDER BY id ASC`).all(...params).map(mapTraceBatch);
+}
+function getTraceBatchById(id) {
+  return mapTraceBatch(getDb().prepare('SELECT * FROM trace_batches WHERE id = ?').get(id));
+}
+function getTraceBatchByBatchNo(batchNo) {
+  return mapTraceBatch(getDb().prepare('SELECT * FROM trace_batches WHERE batch_no = ?').get(batchNo));
+}
+function getTraceBatchByHarvestId(harvestId) {
+  return mapTraceBatch(getDb().prepare('SELECT * FROM trace_batches WHERE harvest_id = ?').get(harvestId));
+}
+function createTraceBatch(d) {
+  const info = getDb()
+    .prepare(`INSERT INTO trace_batches (batch_no, batch_type, quantity_kg, product, status, harvest_id, apiary_id, note)
+              VALUES (@batchNo, @batchType, @quantityKg, @product, @status, @harvestId, @apiaryId, @note)`)
+    .run({
+      batchNo: d.batchNo, batchType: d.batchType, quantityKg: d.quantityKg ?? 0,
+      product: d.product || 'honey', status: d.status || 'active',
+      harvestId: d.harvestId ?? null, apiaryId: d.apiaryId ?? null, note: d.note ?? '',
+    });
+  return mapTraceBatch(getDb().prepare('SELECT * FROM trace_batches WHERE id = ?').get(info.lastInsertRowid));
+}
+
+/* ----------------------------- 批次流转边 ----------------------------- */
+
+function listEdgesFromBatch(batchId) {
+  return getDb()
+    .prepare('SELECT * FROM trace_edges WHERE from_batch_id = ? ORDER BY id ASC')
+    .all(batchId).map(mapTraceEdge);
+}
+function listEdgesToBatch(batchId) {
+  return getDb()
+    .prepare('SELECT * FROM trace_edges WHERE to_batch_id = ? ORDER BY id ASC')
+    .all(batchId).map(mapTraceEdge);
+}
+function createTraceEdge(d) {
+  const info = getDb()
+    .prepare(`INSERT INTO trace_edges (transfer_type, from_batch_id, to_batch_id, quantity_kg, loss_kg, note)
+              VALUES (?, ?, ?, ?, ?, ?)`)
+    .run(d.transferType, d.fromBatchId, d.toBatchId, d.quantityKg, d.lossKg ?? 0, d.note ?? '');
+  return mapTraceEdge(getDb().prepare('SELECT * FROM trace_edges WHERE id = ?').get(info.lastInsertRowid));
+}
+
+/* ----------------------------- 防篡改凭据 ----------------------------- */
+
+function getCredentialByBatchId(batchId) {
+  return mapCredential(getDb().prepare('SELECT * FROM trace_credentials WHERE batch_id = ?').get(batchId));
+}
+function createCredential(d) {
+  const info = getDb()
+    .prepare('INSERT INTO trace_credentials (batch_id, credential_hash, parent_hashes, payload) VALUES (?, ?, ?, ?)')
+    .run(d.batchId, d.credentialHash, d.parentHashes, d.payload);
+  return mapCredential(getDb().prepare('SELECT * FROM trace_credentials WHERE id = ?').get(info.lastInsertRowid));
+}
+
 module.exports = {
   mapUser, mapApiary, mapHive, mapInspection, mapHarvest,
+  mapHarvestHive, mapTraceBatch, mapTraceEdge, mapCredential,
   getUserByUsername, getUserById, listUsers, createUser, updateUser, deleteUser, countUsers,
   listApiaries, getApiaryById, getApiaryByCode, createApiary, updateApiary, deleteApiary,
   listHives, getHiveById, getHiveByCode, createHive, updateHive, deleteHive,
   listInspections, createInspection,
   listHarvests, getHarvestByBatchNo, createHarvest,
+  listHarvestHivesByHarvest, listHarvestHivesByHive, createHarvestHive,
+  listTraceBatches, getTraceBatchById, getTraceBatchByBatchNo, getTraceBatchByHarvestId, createTraceBatch,
+  listEdgesFromBatch, listEdgesToBatch, createTraceEdge,
+  getCredentialByBatchId, createCredential,
 };

@@ -169,3 +169,206 @@ test('不存在的接口返回 404', async () => {
   const res = await request(app).get('/api/not-exist');
   assert.strictEqual(res.status, 404);
 });
+
+test('溯源批次列表能读到种子数据', async () => {
+  beforeEachReset();
+  const token = await loginAs('admin', 'admin123');
+  const res = await request(app).get('/api/trace/batches').set('Authorization', `Bearer ${token}`);
+  assert.strictEqual(res.status, 200);
+  assert.ok(res.body.data.length >= 6, `应有 6+ 批次，实际 ${res.body.data.length}`);
+  const raws = res.body.data.filter((b) => b.batchType === 'raw');
+  assert.strictEqual(raws.length, 2);
+  const finished = res.body.data.filter((b) => b.batchType === 'finished');
+  assert.strictEqual(finished.length, 2);
+});
+
+test('溯源批次详情含边和凭据', async () => {
+  beforeEachReset();
+  const token = await loginAs('admin', 'admin123');
+  const list = await request(app).get('/api/trace/batches?batchType=raw').set('Authorization', `Bearer ${token}`);
+  const rawId = list.body.data[0].id;
+  const detail = await request(app).get(`/api/trace/batches/${rawId}`).set('Authorization', `Bearer ${token}`);
+  assert.strictEqual(detail.status, 200);
+  assert.ok(detail.body.data.credential, '应有凭据');
+  assert.ok(detail.body.data.credential.credentialHash, '凭据应有哈希');
+  assert.ok(Array.isArray(detail.body.data.childEdges), '应有子边');
+});
+
+test('新建溯源批次并自动生成凭据', async () => {
+  beforeEachReset();
+  const token = await loginAs('keeper', 'keeper123');
+  const harvests = (await request(app).get('/api/harvests').set('Authorization', `Bearer ${token}`)).body.data;
+  const hv = harvests[0];
+  const res = await request(app)
+    .post('/api/trace/batches')
+    .set('Authorization', `Bearer ${token}`)
+    .send({ batchNo: 'TB-TEST-001', batchType: 'raw', quantityKg: 10, product: 'honey', harvestId: hv.id, apiaryId: hv.apiaryId });
+  assert.strictEqual(res.status, 201, JSON.stringify(res.body));
+  assert.ok(res.body.data.batch);
+  assert.ok(res.body.data.credential);
+  assert.ok(res.body.data.credential.credentialHash);
+});
+
+test('批次拆分：创建子批次和边，数量守恒', async () => {
+  beforeEachReset();
+  const token = await loginAs('admin', 'admin123');
+  const list = await request(app).get('/api/trace/batches?batchType=raw').set('Authorization', `Bearer ${token}`);
+  const rawId = list.body.data[0].id;
+  const res = await request(app)
+    .post(`/api/trace/batches/${rawId}/split`)
+    .set('Authorization', `Bearer ${token}`)
+    .send({
+      children: [
+        { batchNo: 'TB-SPLIT-A', quantityKg: 5, batchType: 'intermediate' },
+        { batchNo: 'TB-SPLIT-B', quantityKg: 3, lossKg: 0.5, batchType: 'intermediate', note: '滤渣' },
+      ],
+    });
+  assert.strictEqual(res.status, 201, JSON.stringify(res.body));
+  assert.strictEqual(res.body.data.children.length, 2);
+  assert.strictEqual(res.body.data.children[0].batch.quantityKg, 5);
+  assert.strictEqual(res.body.data.children[1].batch.quantityKg, 3);
+  assert.ok(res.body.data.children[0].credential.credentialHash);
+});
+
+test('批次拆分：数量超出源批次返回 400', async () => {
+  beforeEachReset();
+  const token = await loginAs('admin', 'admin123');
+  const list = await request(app).get('/api/trace/batches?batchType=raw').set('Authorization', `Bearer ${token}`);
+  const rawId = list.body.data[0].id;
+  const res = await request(app)
+    .post(`/api/trace/batches/${rawId}/split`)
+    .set('Authorization', `Bearer ${token}`)
+    .send({
+      children: [
+        { batchNo: 'TB-SPLIT-TOO-MUCH', quantityKg: 999, batchType: 'intermediate' },
+      ],
+    });
+  assert.strictEqual(res.status, 400);
+  assert.ok(res.body.error.message.includes('超过'));
+});
+
+test('批次合并：多来源合并成一个', async () => {
+  beforeEachReset();
+  const token = await loginAs('admin', 'admin123');
+  const list = await request(app).get('/api/trace/batches?batchType=intermediate').set('Authorization', `Bearer ${token}`);
+  const mids = list.body.data;
+  assert.ok(mids.length >= 2, `需要至少 2 个中间批次，实际 ${mids.length}`);
+  const res = await request(app)
+    .post('/api/trace/batches/merge')
+    .set('Authorization', `Bearer ${token}`)
+    .send({
+      target: { batchNo: 'TB-MERGE-001', quantityKg: 5, product: 'honey' },
+      sources: [
+        { batchId: mids[0].id, quantityKg: 3 },
+        { batchId: mids[1].id, quantityKg: 2.1, lossKg: 0.1 },
+      ],
+    });
+  assert.strictEqual(res.status, 201, JSON.stringify(res.body));
+  assert.strictEqual(res.body.data.target.batch.quantityKg, 5);
+  assert.strictEqual(res.body.data.edges.length, 2);
+  assert.ok(res.body.data.target.credential.credentialHash);
+});
+
+test('批次合并：目标量超过投入返回 400', async () => {
+  beforeEachReset();
+  const token = await loginAs('admin', 'admin123');
+  const list = await request(app).get('/api/trace/batches?batchType=intermediate').set('Authorization', `Bearer ${token}`);
+  const mids = list.body.data;
+  const res = await request(app)
+    .post('/api/trace/batches/merge')
+    .set('Authorization', `Bearer ${token}`)
+    .send({
+      target: { batchNo: 'TB-MERGE-BAD', quantityKg: 999 },
+      sources: [
+        { batchId: mids[0].id, quantityKg: 1 },
+      ],
+    });
+  assert.strictEqual(res.status, 400);
+  assert.ok(res.body.error.message.includes('超过'));
+});
+
+test('灌装：中间批次灌装为成品', async () => {
+  beforeEachReset();
+  const token = await loginAs('admin', 'admin123');
+  const list = await request(app).get('/api/trace/batches?batchType=intermediate').set('Authorization', `Bearer ${token}`);
+  const midId = list.body.data[0].id;
+  const res = await request(app)
+    .post(`/api/trace/batches/${midId}/bottle`)
+    .set('Authorization', `Bearer ${token}`)
+    .send({ batchNo: 'TB-BOTTLE-001', quantityKg: 2, lossKg: 0.05, product: 'honey' });
+  assert.strictEqual(res.status, 201, JSON.stringify(res.body));
+  assert.strictEqual(res.body.data.batch.batchType, 'finished');
+  assert.strictEqual(res.body.data.batch.status, 'warehoused');
+  assert.ok(res.body.data.credential.credentialHash);
+});
+
+test('采收-蜂群关联：创建并查询', async () => {
+  beforeEachReset();
+  const token = await loginAs('admin', 'admin123');
+  const harvests = (await request(app).get('/api/harvests').set('Authorization', `Bearer ${token}`)).body.data;
+  const hives = (await request(app).get('/api/hives').set('Authorization', `Bearer ${token}`)).body.data;
+  const res = await request(app)
+    .post('/api/trace/harvest-hives')
+    .set('Authorization', `Bearer ${token}`)
+    .send({ harvestId: harvests[0].id, hiveId: hives[0].id, quantityKg: 8.5 });
+  assert.strictEqual(res.status, 201, JSON.stringify(res.body));
+  assert.strictEqual(res.body.data.quantityKg, 8.5);
+
+  const byHarvest = await request(app).get(`/api/trace/harvest-hives/harvest/${harvests[0].id}`).set('Authorization', `Bearer ${token}`);
+  assert.strictEqual(byHarvest.status, 200);
+  assert.ok(byHarvest.body.data.length >= 1);
+});
+
+test('正向追踪：从蜂群追踪到成品批次', async () => {
+  beforeEachReset();
+  const token = await loginAs('admin', 'admin123');
+  const hives = (await request(app).get('/api/hives').set('Authorization', `Bearer ${token}`)).body.data;
+  const target = hives.find((h) => h.code === 'XF-001');
+  assert.ok(target, '应找到 XF-001 蜂群');
+  const res = await request(app).get(`/api/trace/forward/${target.id}`).set('Authorization', `Bearer ${token}`);
+  assert.strictEqual(res.status, 200);
+  assert.ok(res.body.data.rawBatches.length >= 1, '应有原始批次');
+  assert.ok(res.body.data.finishedBatches.length >= 1, '应有成品批次');
+});
+
+test('逆向溯源：从成品批次倒查到蜂群和检查记录', async () => {
+  beforeEachReset();
+  const token = await loginAs('admin', 'admin123');
+  const list = await request(app).get('/api/trace/batches?batchType=finished').set('Authorization', `Bearer ${token}`);
+  const finId = list.body.data[0].id;
+  const res = await request(app).get(`/api/trace/reverse/${finId}`).set('Authorization', `Bearer ${token}`);
+  assert.strictEqual(res.status, 200);
+  assert.ok(res.body.data.rawBatches.length >= 1, '应有原始批次');
+  assert.ok(res.body.data.hives.length >= 1, '应有蜂群');
+  assert.ok(res.body.data.inspections.length >= 1, '应有检查记录');
+  assert.ok(res.body.data.apiaries.length >= 1, '应有蜂场');
+});
+
+test('哈希链完整性校验：种子数据全部通过', async () => {
+  beforeEachReset();
+  const token = await loginAs('admin', 'admin123');
+  const list = await request(app).get('/api/trace/batches?batchType=raw').set('Authorization', `Bearer ${token}`);
+  const rawId = list.body.data[0].id;
+  const res = await request(app).get(`/api/trace/verify/${rawId}`).set('Authorization', `Bearer ${token}`);
+  assert.strictEqual(res.status, 200);
+  assert.strictEqual(res.body.data.single.valid, true, `单批校验应通过: ${JSON.stringify(res.body.data.single)}`);
+  assert.strictEqual(res.body.data.chain.valid, true, `链校验应通过: ${JSON.stringify(res.body.data.chain)}`);
+});
+
+test('数量守恒校验：种子数据全部通过', async () => {
+  beforeEachReset();
+  const token = await loginAs('admin', 'admin123');
+  const res = await request(app).get('/api/trace/conservation').set('Authorization', `Bearer ${token}`);
+  assert.strictEqual(res.status, 200);
+  assert.strictEqual(res.body.data.ok, true, `全局守恒应通过: ${JSON.stringify(res.body.data.violations)}`);
+});
+
+test('单个批次数守恒校验', async () => {
+  beforeEachReset();
+  const token = await loginAs('admin', 'admin123');
+  const list = await request(app).get('/api/trace/batches?batchType=raw').set('Authorization', `Bearer ${token}`);
+  const rawId = list.body.data[0].id;
+  const res = await request(app).get(`/api/trace/conservation/${rawId}`).set('Authorization', `Bearer ${token}`);
+  assert.strictEqual(res.status, 200);
+  assert.strictEqual(res.body.data.ok, true);
+});

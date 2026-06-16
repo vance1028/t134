@@ -8,6 +8,7 @@ const usersRouter = require('./routes/users');
 const apiariesRouter = require('./routes/apiaries');
 const hivesRouter = require('./routes/hives');
 const harvestsRouter = require('./routes/harvests');
+const traceRouter = require('./routes/trace');
 const { sendError } = require('./utils/http');
 
 /** 创建 Express 应用。数据库连接与种子由调用方准备。 */
@@ -25,6 +26,7 @@ function createApp() {
   app.use('/api/apiaries', apiariesRouter);
   app.use('/api/hives', hivesRouter);
   app.use('/api/harvests', harvestsRouter);
+  app.use('/api/trace', traceRouter);
 
   app.use((req, res) => sendError(res, 404, '接口不存在'));
 

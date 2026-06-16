@@ -1,6 +1,7 @@
 'use strict';
 
 const store = require('./data/store');
+const trace = require('./utils/trace');
 
 /**
  * 写入初始种子数据：管理员 / 养蜂员 / 观察员各一个账号，
@@ -60,6 +61,81 @@ function seed() {
     product: 'royal_jelly', quantityKg: 1.2, note: '蜂王浆，冷链暂存',
   });
 
+  const harvests = store.listHarvests({});
+  const hv1 = harvests.find((h) => h.batchNo === 'HV-2026-0001');
+  const hv2 = harvests.find((h) => h.batchNo === 'HV-2026-0002');
+
+  store.createHarvestHive({ harvestId: hv1.id, hiveId: hiveRecs[0].id, quantityKg: 16 });
+  store.createHarvestHive({ harvestId: hv1.id, hiveId: hiveRecs[1].id, quantityKg: 12.5 });
+
+  const rawBatch1 = store.createTraceBatch({
+    batchNo: 'TB-RAW-0001', batchType: 'raw', quantityKg: 28.5,
+    product: 'honey', harvestId: hv1.id, apiaryId: a1.id,
+    note: 'HV-2026-0001 对应的溯源原始批次',
+  });
+  trace.issueCredential(rawBatch1.id);
+
+  const rawBatch2 = store.createTraceBatch({
+    batchNo: 'TB-RAW-0002', batchType: 'raw', quantityKg: 1.2,
+    product: 'royal_jelly', harvestId: hv2.id, apiaryId: a2.id,
+    note: 'HV-2026-0002 对应的溯源原始批次',
+  });
+  trace.issueCredential(rawBatch2.id);
+
+  const midA = store.createTraceBatch({
+    batchNo: 'TB-MID-0001A', batchType: 'intermediate', quantityKg: 15,
+    product: 'honey', note: '拆分：高山百花蜜 A 部分',
+  });
+  store.createTraceEdge({
+    transferType: 'split', fromBatchId: rawBatch1.id, toBatchId: midA.id,
+    quantityKg: 15, lossKg: 0, note: '拆分为 A/B 两部分',
+  });
+  trace.issueCredential(midA.id);
+
+  const midB = store.createTraceBatch({
+    batchNo: 'TB-MID-0001B', batchType: 'intermediate', quantityKg: 13.3,
+    product: 'honey', note: '拆分：高山百花蜜 B 部分',
+  });
+  store.createTraceEdge({
+    transferType: 'split', fromBatchId: rawBatch1.id, toBatchId: midB.id,
+    quantityKg: 13.3, lossKg: 0.2, note: '拆分为 A/B 两部分，0.2kg 滤渣损耗',
+  });
+  trace.issueCredential(midB.id);
+
+  const merged = store.createTraceBatch({
+    batchNo: 'TB-MID-0003', batchType: 'intermediate', quantityKg: 14,
+    product: 'honey', note: '勾兑：MID-0001A 的 10kg + MID-0001B 的 4kg',
+  });
+  store.createTraceEdge({
+    transferType: 'merge', fromBatchId: midA.id, toBatchId: merged.id,
+    quantityKg: 10, lossKg: 0, note: 'A 部分投入 10kg',
+  });
+  store.createTraceEdge({
+    transferType: 'merge', fromBatchId: midB.id, toBatchId: merged.id,
+    quantityKg: 4, lossKg: 0, note: 'B 部分投入 4kg',
+  });
+  trace.issueCredential(merged.id);
+
+  const finished1 = store.createTraceBatch({
+    batchNo: 'TB-FIN-0001', batchType: 'finished', quantityKg: 4.9,
+    product: 'honey', status: 'warehoused', note: '灌装 500g×9 瓶 + 0.1kg 灌装损耗',
+  });
+  store.createTraceEdge({
+    transferType: 'bottle', fromBatchId: midA.id, toBatchId: finished1.id,
+    quantityKg: 4.9, lossKg: 0.1, note: '500g 玻璃瓶×9',
+  });
+  trace.issueCredential(finished1.id);
+
+  const finished2 = store.createTraceBatch({
+    batchNo: 'TB-FIN-0002', batchType: 'finished', quantityKg: 13.8,
+    product: 'honey', status: 'warehoused', note: '大桶灌装',
+  });
+  store.createTraceEdge({
+    transferType: 'bottle', fromBatchId: merged.id, toBatchId: finished2.id,
+    quantityKg: 13.8, lossKg: 0.2, note: '大桶灌装，0.2kg 挂壁损耗',
+  });
+  trace.issueCredential(finished2.id);
+
   return {
     skipped: false,
     users: 3,
@@ -67,6 +143,9 @@ function seed() {
     hives: hiveRecs.length,
     inspections: 3,
     harvests: 2,
+    traceBatches: 6,
+    traceEdges: 6,
+    traceCredentials: 6,
   };
 }
 
